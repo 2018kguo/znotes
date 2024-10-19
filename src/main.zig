@@ -9,6 +9,40 @@ const print = std.debug.print;
 const UUID = @import("uuid.zig").UUID;
 
 const log = std.log.scoped(.main);
+
+fn printChildren(win: *vaxis.Window, children: ?std.ArrayList(FileEntry), depth: usize, cursor_index: usize, offset: usize) !usize {
+    var new_offset = offset;
+    if (children) |unwrapped_children| {
+        for (unwrapped_children.items, 0..) |child, j| {
+            var style: vaxis.Style = .{};
+            if (child.is_open) {
+                style.ul_style = .single;
+            }
+            if (child.kind == .directory) {
+                style.fg = .{ .index = 4 };
+            }
+            if (j == cursor_index) {
+                style.reverse = true;
+            }
+
+            // Create indentation based on depth
+            const indentation = 2 * depth;
+
+            var seg = [_]vaxis.Segment{
+                .{ .text = child.name, .style = style },
+            };
+            _ = win.print(&seg, .{ .row_offset = new_offset, .col_offset = indentation }) catch {};
+            new_offset += 1;
+
+            // Recursively print children if it's a directory and is open
+            if (child.kind == .directory and child.is_open) {
+                new_offset = try printChildren(win, child.children, depth + 1, cursor_index, new_offset);
+            }
+        }
+    }
+    return new_offset;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
@@ -63,14 +97,26 @@ pub fn main() !void {
     var color_idx: u8 = 0;
     const msg = "Hello, world!";
 
+    var cursor_index: usize = 0;
+    if (selector.root.children) |unwrapped_children| {
+        if (unwrapped_children.items.len > 0) {
+            const child_name = unwrapped_children.items[cursor_index].name;
+            try selector.appendToSelectedPath(child_name);
+            std.debug.print("Selected path: {s}\n", .{selector.selected_path});
+        }
+    }
+
     // The main event loop. Vaxis provides a thread safe, blocking, buffered
     // queue which can serve as the primary event queue for an application
     while (true) {
         // nextEvent blocks until an event is in the queue
         const event = loop.nextEvent();
+        std.debug.print("Selected path: {s}\n", .{selector.selected_path});
         // log.debug("event: {}", .{event});
         // exhaustive switching ftw. Vaxis will send events if your Event
         // enum has the fields for those events (ie "key_press", "winsize")
+        const children = selector.root.children;
+
         switch (event) {
             .key_press => |key| {
                 color_idx = switch (color_idx) {
@@ -79,6 +125,43 @@ pub fn main() !void {
                 };
                 if (key.codepoint == 'c' and key.mods.ctrl) {
                     break;
+                } else if (key.matches(vaxis.Key.tab, .{}) or key.codepoint == 'j') {
+                    if (children) |unwrapped_children| {
+                        switch (unwrapped_children.items.len) {
+                            0 => cursor_index = 0,
+                            else => cursor_index = (cursor_index + 1) % unwrapped_children.items.len,
+                        }
+                    } else {
+                        cursor_index = 0;
+                    }
+                } else if (key.codepoint == 'k') {
+                    if (children) |unwrapped_children| {
+                        switch (unwrapped_children.items.len) {
+                            0 => cursor_index = 0,
+                            else => cursor_index = if (cursor_index > 0)
+                                @max(cursor_index - 1, 0) % unwrapped_children.items.len
+                            else
+                                unwrapped_children.items.len - 1,
+                        }
+                    } else {
+                        cursor_index = 0;
+                    }
+                } else if (key.codepoint == 'o') {
+                    if (children) |unwrapped_children| {
+                        if (unwrapped_children.items.len > 0) {
+                            const child = unwrapped_children.items[cursor_index];
+                            if (child.kind == .directory) {
+                                //try selector.changeDirectory(child.name);
+                            }
+                        }
+                    }
+                } else if (key.codepoint == 't') {
+                    if (children) |unwrapped_children| {
+                        if (unwrapped_children.items.len > 0) {
+                            const child = unwrapped_children.items[cursor_index];
+                            try selector.toggleDirectoryState(child.uuid);
+                        }
+                    }
                 }
             },
             .winsize => |ws| {
@@ -100,13 +183,34 @@ pub fn main() !void {
         // fill the remaining space of the parent. Child windows do not store a
         // reference to their parent: this is true immediate mode. Do not store
         // windows, always create new windows each render cycle
-        _ = win.child(.{
+        var main_win = win.child(.{
             .x_off = 0,
             .y_off = 0,
             .width = .{ .limit = win.width / 2 },
             .height = .{ .limit = win.height },
             //.border = .{ .where = .all },
         });
+
+        _ = try printChildren(&main_win, children, 0, cursor_index, 0);
+        //if (children) |unwrapped_children| {
+        //    for (unwrapped_children.items, 0..) |child, j| {
+        //        var style: vaxis.Style = .{};
+        //        if (child.is_open) {
+        //            style.ul_style = .single;
+        //        }
+        //        if (child.kind == .directory) {
+        //            style.fg = .{ .index = 4 };
+        //        }
+        //        if (j == cursor_index) {
+        //            style.reverse = true;
+        //        }
+        //        var seg = [_]vaxis.Segment{.{
+        //            .text = child.name,
+        //            .style = style,
+        //        }};
+        //        _ = main_win.print(&seg, .{ .row_offset = j + 0 }) catch {};
+        //    }
+        //}
 
         _ = win.child(.{
             .x_off = 0,
@@ -151,7 +255,7 @@ pub fn main() !void {
 }
 
 const MAX_HISTORY = 10; // Adjust as needed
-const MAX_ENTRIES = 5000; // Maximum number of FileEntry items
+const MAX_ENTRIES = 10000; // Maximum number of FileEntry items
 
 const DirectoryState = struct {
     path: []const u8,
@@ -173,7 +277,7 @@ const DirectoryState = struct {
 const DirectorySelector = struct {
     arena: std.heap.ArenaAllocator,
     root: *FileEntry,
-    selected_path: [1024]u8,
+    selected_path: [2048]u8,
     selected_path_len: usize,
     history: std.ArrayList(DirectoryState),
     history_allocator: std.mem.Allocator,
@@ -217,6 +321,29 @@ const DirectorySelector = struct {
         self.selected_path_len = path.len;
     }
 
+    pub fn appendToSelectedPath(self: *DirectorySelector, name: []const u8) !void {
+        if (self.selected_path_len + name.len + 1 > self.selected_path.len) {
+            return error.PathTooLong;
+        }
+
+        self.selected_path[self.selected_path_len] = '/';
+        @memcpy(self.selected_path[self.selected_path_len + 1 .. self.selected_path_len + 1 + name.len], name);
+        self.selected_path_len += name.len + 1;
+    }
+
+    pub fn popFromSelectedPath(self: *DirectorySelector) !void {
+        if (self.selected_path_len == 0) return;
+
+        var i = self.selected_path_len - 1;
+        while (i > 0) : (i -= 1) {
+            if (self.selected_path[i] == '/') {
+                break;
+            }
+        }
+
+        self.selected_path_len = i;
+    }
+
     pub fn changeDirectory(self: *DirectorySelector, new_path: []const u8) !void {
         try self.saveCurrentState();
 
@@ -232,7 +359,13 @@ const DirectorySelector = struct {
     fn loadChildren(self: *DirectorySelector, entry: *FileEntry, depth: usize) !void {
         if (entry.kind != .directory or depth >= 2 or self.entry_count >= MAX_ENTRIES) return;
 
-        var dir = try std.fs.cwd().openDir(entry.name, .{ .iterate = true });
+        var dir = std.fs.cwd().openDir(entry.name, .{ .iterate = true }) catch |err| {
+            if (err == error.FileNotFound) {
+                //std.debug.print("Directory not found: {s}\n", .{entry.name});
+                return;
+            }
+            return err; // Propagate other errors
+        };
         defer dir.close();
 
         var it = dir.iterate();
@@ -242,6 +375,7 @@ const DirectorySelector = struct {
             const child = try FileEntry.init(self.arena.allocator(), file_entry.name, file_entry.kind);
             try entry.children.?.append(child.*);
             self.entry_count += 1;
+            //std.debug.print("entry_count: {d}\n", .{self.entry_count});
 
             if (file_entry.kind == .directory and depth < 1) {
                 try self.loadChildren(child, depth + 1);
@@ -267,7 +401,7 @@ const DirectorySelector = struct {
         if (self.findEntry(uuid)) |entry| {
             if (entry.kind == .directory) {
                 entry.is_open = !entry.is_open;
-                if (entry.is_open and entry.children == null) {
+                if (entry.is_open) {
                     entry.children = std.ArrayList(FileEntry).init(self.arena.allocator());
                     try self.loadChildren(entry, 0);
                 }
