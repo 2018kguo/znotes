@@ -10,10 +10,30 @@ const UUID = @import("uuid.zig").UUID;
 
 const log = std.log.scoped(.main);
 
-fn printChildren(win: *vaxis.Window, children: ?std.ArrayList(FileEntry), depth: usize, cursor_index: usize, offset: usize) !usize {
+fn pathMatchesAtDepth(
+    selected_path: []const u8,
+    depth: usize,
+    file_name: []const u8,
+) bool {
+    var it = std.mem.split(u8, selected_path, "/");
+    var current_depth: usize = 0;
+    while (it.next()) |segment| {
+        if (current_depth == depth) {
+            // Trim any trailing null bytes or spaces from the segment
+            const trimmed_segment = std.mem.trimRight(u8, segment, &[_]u8{0});
+            const matches = std.mem.eql(u8, trimmed_segment, file_name);
+            return matches;
+        }
+        current_depth += 1;
+    }
+    return false;
+}
+
+fn printChildren(win: *vaxis.Window, children: ?std.ArrayList(FileEntry), depth: usize, offset: usize, cur_path: []u8) !usize {
     var new_offset = offset;
+    //std.debug.print("cur_path: {s}\n", .{cur_path});
     if (children) |unwrapped_children| {
-        for (unwrapped_children.items, 0..) |child, j| {
+        for (unwrapped_children.items) |child| {
             var style: vaxis.Style = .{};
             if (child.is_open) {
                 style.ul_style = .single;
@@ -21,7 +41,8 @@ fn printChildren(win: *vaxis.Window, children: ?std.ArrayList(FileEntry), depth:
             if (child.kind == .directory) {
                 style.fg = .{ .index = 4 };
             }
-            if (j == cursor_index) {
+            if (pathMatchesAtDepth(cur_path, depth, child.name)) {
+                //std.debug.print("Matched: {s}\n", .{child.name});
                 style.reverse = true;
             }
 
@@ -36,7 +57,7 @@ fn printChildren(win: *vaxis.Window, children: ?std.ArrayList(FileEntry), depth:
 
             // Recursively print children if it's a directory and is open
             if (child.kind == .directory and child.is_open) {
-                new_offset = try printChildren(win, child.children, depth + 1, cursor_index, new_offset);
+                new_offset = try printChildren(win, child.children, depth + 1, new_offset, cur_path);
             }
         }
     }
@@ -97,21 +118,21 @@ pub fn main() !void {
     var color_idx: u8 = 0;
     const msg = "Hello, world!";
 
-    var cursor_index: usize = 0;
     if (selector.root.children) |unwrapped_children| {
         if (unwrapped_children.items.len > 0) {
-            const child_name = unwrapped_children.items[cursor_index].name;
+            const child_name = unwrapped_children.items[0].name;
             try selector.appendToSelectedPath(child_name);
-            std.debug.print("Selected path: {s}\n", .{selector.selected_path});
+            //std.debug.print("Selected path: {s}\n", .{selector.selected_path});
         }
     }
 
     // The main event loop. Vaxis provides a thread safe, blocking, buffered
     // queue which can serve as the primary event queue for an application
     while (true) {
+        //std.debug.print("Selected path at start of loop: {s}\n", .{selector.selected_path});
         // nextEvent blocks until an event is in the queue
         const event = loop.nextEvent();
-        std.debug.print("Selected path: {s}\n", .{selector.selected_path});
+        // std.debug.print("Selected path: {s}\n", .{selector.selected_path});
         // log.debug("event: {}", .{event});
         // exhaustive switching ftw. Vaxis will send events if your Event
         // enum has the fields for those events (ie "key_press", "winsize")
@@ -126,42 +147,21 @@ pub fn main() !void {
                 if (key.codepoint == 'c' and key.mods.ctrl) {
                     break;
                 } else if (key.matches(vaxis.Key.tab, .{}) or key.codepoint == 'j') {
-                    if (children) |unwrapped_children| {
-                        switch (unwrapped_children.items.len) {
-                            0 => cursor_index = 0,
-                            else => cursor_index = (cursor_index + 1) % unwrapped_children.items.len,
-                        }
-                    } else {
-                        cursor_index = 0;
-                    }
+                    try navigateToSibling(&selector, 1, current_absolute_path);
                 } else if (key.codepoint == 'k') {
-                    if (children) |unwrapped_children| {
-                        switch (unwrapped_children.items.len) {
-                            0 => cursor_index = 0,
-                            else => cursor_index = if (cursor_index > 0)
-                                @max(cursor_index - 1, 0) % unwrapped_children.items.len
-                            else
-                                unwrapped_children.items.len - 1,
-                        }
-                    } else {
-                        cursor_index = 0;
-                    }
+                    try navigateToSibling(&selector, -1, current_absolute_path);
                 } else if (key.codepoint == 'o') {
-                    if (children) |unwrapped_children| {
-                        if (unwrapped_children.items.len > 0) {
-                            const child = unwrapped_children.items[cursor_index];
-                            if (child.kind == .directory) {
-                                //try selector.changeDirectory(child.name);
-                            }
-                        }
-                    }
+                    const asdf_test = selector.selected_path[current_absolute_path.len + 1 ..];
+                    std.debug.print("Selected path: {s}\n", .{asdf_test});
+                    const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
+                    std.debug.print("Selected entry: {s}\n", .{selected_entry.name});
                 } else if (key.codepoint == 't') {
-                    if (children) |unwrapped_children| {
-                        if (unwrapped_children.items.len > 0) {
-                            const child = unwrapped_children.items[cursor_index];
-                            try selector.toggleDirectoryState(child.uuid);
-                        }
-                    }
+                    //if (children) |unwrapped_children| {
+                    //    if (unwrapped_children.items.len > 0) {
+                    //        const child = unwrapped_children.items[cursor_index];
+                    //        try selector.toggleDirectoryState(child.uuid);
+                    //    }
+                    //}
                 }
             },
             .winsize => |ws| {
@@ -191,7 +191,10 @@ pub fn main() !void {
             //.border = .{ .where = .all },
         });
 
-        _ = try printChildren(&main_win, children, 0, cursor_index, 0);
+        //std.debug.print("Selected path: {s}\n", .{selector.selected_path});
+        const cur_path = selector.selected_path[current_absolute_path.len + 1 ..];
+
+        _ = try printChildren(&main_win, children, 0, 0, cur_path);
         //if (children) |unwrapped_children| {
         //    for (unwrapped_children.items, 0..) |child, j| {
         //        var style: vaxis.Style = .{};
@@ -249,6 +252,7 @@ pub fn main() !void {
             };
             preview_win.writeCell(i, 0, cell);
         }
+        //std.debug.print("Selected path at end of loop: {s}\n", .{selector.selected_path});
         // Render the screen
         try vx.render(tty.anyWriter());
     }
@@ -320,6 +324,50 @@ const DirectorySelector = struct {
         @memcpy(self.selected_path[0..path.len], path);
         self.selected_path_len = path.len;
     }
+
+    pub fn setSelectedPathToSibling(self: *DirectorySelector, sibling_name: []const u8) !void {
+        // Find the last slash in the current path
+        const last_slash_index = std.mem.lastIndexOfScalar(u8, self.selected_path[0..self.selected_path_len], '/') orelse return error.NoParentDirectory;
+
+        // Calculate the new length
+        const new_len = last_slash_index + 1 + sibling_name.len;
+
+        // Ensure the new path fits in the buffer
+        if (new_len > self.selected_path.len) {
+            return error.PathTooLong;
+        }
+
+        // Copy the sibling name after the last slash
+        @memcpy(self.selected_path[last_slash_index + 1 .. new_len], sibling_name);
+
+        // Clear any remaining characters from the old path
+        if (new_len < self.selected_path_len) {
+            @memset(self.selected_path[new_len..self.selected_path_len], 0);
+        }
+
+        // Update the length
+        self.selected_path_len = new_len;
+
+        // Add a debug print to verify the change
+        //std.debug.print("New selected path: {s}\n", .{self.selected_path[0..self.selected_path_len]});
+    }
+    //pub fn setSelectedPathToSibling(self: *DirectorySelector, sibling_name: []const u8) !void {
+    //    // Find the last slash in the current path
+    //    const last_slash_index = std.mem.lastIndexOfScalar(u8, self.selected_path[0..self.selected_path_len], '/') orelse return error.NoParentDirectory;
+
+    //    // Calculate the new length
+    //    const new_len = last_slash_index + 1 + sibling_name.len;
+
+    //    // Ensure the new path fits in the buffer
+    //    if (new_len > self.selected_path.len) {
+    //        return error.PathTooLong;
+    //    }
+
+    //    // Copy the sibling name after the last slash
+    //    @memcpy(self.selected_path[last_slash_index + 1 .. new_len], sibling_name);
+
+    //    self.selected_path_len = @intCast(new_len);
+    //}
 
     pub fn appendToSelectedPath(self: *DirectorySelector, name: []const u8) !void {
         if (self.selected_path_len + name.len + 1 > self.selected_path.len) {
@@ -412,6 +460,37 @@ const DirectorySelector = struct {
     fn findEntry(self: *DirectorySelector, uuid: [36]u8) ?*FileEntry {
         return self.root.findEntryRecursive(uuid);
     }
+
+    fn findEntryFromPath(self: *DirectorySelector, path: []const u8) ?*FileEntry {
+        var it = std.mem.split(u8, path, "/");
+        var current_entry: ?*FileEntry = self.root;
+
+        while (it.next()) |segment| {
+            if (segment.len == 0) continue;
+
+            if (current_entry) |entry| {
+                if (entry.children) |children| {
+                    var found = false;
+                    for (children.items) |*child| {
+                        if (std.mem.startsWith(u8, segment, child.name)) {
+                            current_entry = child;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        return null; // Path segment not found
+                    }
+                } else {
+                    return null; // Current entry is not a directory
+                }
+            } else {
+                return null; // Current entry is null
+            }
+        }
+
+        return current_entry;
+    }
 };
 
 const FileEntry = struct {
@@ -461,6 +540,46 @@ const FileEntry = struct {
     }
 };
 
+fn findChildIndex(parent: *FileEntry, child: *FileEntry) ?usize {
+    if (parent.children) |children| {
+        for (children.items, 0..) |*entry, index| {
+            if (entry == child) {
+                return index;
+            }
+        }
+    }
+    return null;
+}
+
+fn navigateToSibling(selector: *DirectorySelector, index_increment: i32, current_absolute_path: []u8) !void {
+    const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
+    // Find the last slash in the current path
+    const last_slash_index = std.mem.lastIndexOfScalar(u8, selector.selected_path[0..selector.selected_path_len], '/') orelse return error.NoParentDirectory;
+
+    // The parent path is everything up to the last slash
+    const parent_path = selector.selected_path[0..last_slash_index];
+    //std.debug.print("Parent path: {s}\n", .{parent_path});
+    //std.debug.print("Selected entry: {s}\n", .{selected_entry.name});
+    const parent_entry = selector.findEntryFromPath(parent_path) orelse selector.root;
+    //std.debug.print("Parent entry: {s}\n", .{parent_entry.name});
+    //_ = selected_entry;
+    const index_of_selected = findChildIndex(parent_entry, selected_entry).?;
+    //std.debug.print("Index of selected: {?}\n", .{index_of_selected});
+    //std.debug.print("selected_entry: {?}\n", .{selected_entry});
+    //std.debug.print("Index of selected: {d}\n", .{index_of_selected});
+    var new_cursor_index: usize = if (index_increment < 0)
+        if (@abs(index_increment) > index_of_selected)
+            0
+        else
+            index_of_selected - @as(usize, @intCast(@abs(index_increment)))
+    else
+        index_of_selected +| @as(usize, @intCast(index_increment));
+    new_cursor_index = new_cursor_index % parent_entry.children.?.items.len;
+    //std.debug.print("New cursor index: {d}\n", .{new_cursor_index});
+    const child = parent_entry.children.?.items[new_cursor_index];
+    //std.debug.print("child name: {s}\n", .{child.name});
+    try selector.setSelectedPathToSibling(child.name);
+}
 //const DirectorySelector = struct {
 //
 //    idx: usize,
