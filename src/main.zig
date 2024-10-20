@@ -125,6 +125,7 @@ pub fn main() !void {
             //std.debug.print("Selected path: {s}\n", .{selector.selected_path});
         }
     }
+    var test_mode = false;
 
     // The main event loop. Vaxis provides a thread safe, blocking, buffered
     // queue which can serve as the primary event queue for an application
@@ -147,21 +148,25 @@ pub fn main() !void {
                 if (key.codepoint == 'c' and key.mods.ctrl) {
                     break;
                 } else if (key.matches(vaxis.Key.tab, .{}) or key.codepoint == 'j') {
-                    try navigateToSibling(&selector, 1, current_absolute_path);
+                    try testNavigateToSibling(&selector, 1, current_absolute_path);
                 } else if (key.codepoint == 'k') {
-                    try navigateToSibling(&selector, -1, current_absolute_path);
-                } else if (key.codepoint == 'o') {
-                    const asdf_test = selector.selected_path[current_absolute_path.len + 1 ..];
-                    std.debug.print("Selected path: {s}\n", .{asdf_test});
+                    try testNavigateToSibling(&selector, -1, current_absolute_path);
+                } else if (key.codepoint == 'l') {
                     const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
-                    std.debug.print("Selected entry: {s}\n", .{selected_entry.name});
+                    try navigateToFirstChild(&selector, selected_entry);
+                    //std.debug.print("Selected path: {s}\n", .{selector.selected_path});
                 } else if (key.codepoint == 't') {
+                    test_mode = !test_mode;
                     //if (children) |unwrapped_children| {
                     //    if (unwrapped_children.items.len > 0) {
                     //        const child = unwrapped_children.items[cursor_index];
                     //        try selector.toggleDirectoryState(child.uuid);
                     //    }
                     //}
+                } else if (key.codepoint == 'h') {
+                    // TODO
+                } else if (key.codepoint == 'q') {
+                    break;
                 }
             },
             .winsize => |ws| {
@@ -491,6 +496,38 @@ const DirectorySelector = struct {
 
         return current_entry;
     }
+
+    fn testFindEntryFromPath(self: *DirectorySelector, path: []const u8) ?*FileEntry {
+        var it = std.mem.split(u8, path, "/");
+        var current_entry: ?*FileEntry = self.root;
+
+        while (it.next()) |segment| {
+            if (segment.len == 0) continue;
+
+            if (current_entry) |entry| {
+                if (entry.children) |children| {
+                    var found = false;
+                    for (children.items) |*child| {
+                        //std.debug.print("Segment: {s}, child name: {s}\n", .{ segment, child.name });
+                        if (std.mem.startsWith(u8, segment, child.name)) {
+                            current_entry = child;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        return null; // Path segment not found
+                    }
+                } else {
+                    return null; // Current entry is not a directory
+                }
+            } else {
+                return null; // Current entry is null
+            }
+        }
+
+        return current_entry;
+    }
 };
 
 const FileEntry = struct {
@@ -578,8 +615,81 @@ fn navigateToSibling(selector: *DirectorySelector, index_increment: i32, current
     //std.debug.print("New cursor index: {d}\n", .{new_cursor_index});
     const child = parent_entry.children.?.items[new_cursor_index];
     //std.debug.print("child name: {s}\n", .{child.name});
-    try selector.setSelectedPathToSibling(child.name);
+    selector.setSelectedPathToSibling(child.name) catch {
+        std.debug.print("Error setting selected path to sibling\n", .{});
+    };
 }
+
+fn testNavigateToSibling(selector: *DirectorySelector, index_increment: i32, current_absolute_path: []u8) !void {
+    const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
+    // Find the last slash in the current path
+    const last_slash_index = std.mem.lastIndexOfScalar(u8, selector.selected_path[0..selector.selected_path_len], '/') orelse return error.NoParentDirectory;
+
+    // The parent path is everything up to the last slash
+    const parent_path = selector.selected_path[0..last_slash_index];
+    //std.debug.print("Parent path: {s}\n", .{parent_path});
+    //std.debug.print("Selected entry: {s}\n", .{selected_entry.name});
+    const parent_path_minus_absolute = parent_path[current_absolute_path.len..];
+    const parent_entry = selector.findEntryFromPath(parent_path_minus_absolute) orelse selector.root;
+
+    //const find_parent_test = selector.testFindEntryFromPath(parent_path_minus_absolute);
+    //std.debug.print("Find parent test: {?}\n", .{find_parent_test});
+    ////std.debug.print("Parent entry: {s}\n", .{parent_entry.name});
+    ////_ = selected_entry;
+    const index_of_selected = findChildIndex(parent_entry, selected_entry) orelse {
+        std.debug.print("Error finding index of selected\n", .{});
+        return;
+    };
+    //std.debug.print("Index of selected: {?}\n", .{index_of_selected});
+    //std.debug.print("selected entry name: {s}\n", .{selected_entry.name});
+    //std.debug.print("parent path: {s}\n", .{parent_path});
+    //std.debug.print("is selector root: {d}\n", .{parent_entry == selector.root});
+    ////std.debug.print("Index of selected: {?}\n", .{index_of_selected});
+    ////std.debug.print("selected_entry: {?}\n", .{selected_entry});
+    ////std.debug.print("Index of selected: {d}\n", .{index_of_selected});
+    var new_cursor_index: usize = if (index_increment < 0)
+        if (@abs(index_increment) > index_of_selected)
+            0
+        else
+            index_of_selected - @as(usize, @intCast(@abs(index_increment)))
+    else
+        index_of_selected +| @as(usize, @intCast(index_increment));
+    new_cursor_index = new_cursor_index % parent_entry.children.?.items.len;
+    ////std.debug.print("New cursor index: {d}\n", .{new_cursor_index});
+    const child = parent_entry.children.?.items[new_cursor_index];
+    ////std.debug.print("child name: {s}\n", .{child.name});
+    selector.setSelectedPathToSibling(child.name) catch {
+        std.debug.print("Error setting selected path to sibling\n", .{});
+    };
+}
+
+fn navigateToFirstChild(selector: *DirectorySelector, selected_file_entry: *FileEntry) !void {
+    if (selected_file_entry.kind != .directory) return;
+    if (!selected_file_entry.is_open) {
+        selected_file_entry.is_open = true;
+        selected_file_entry.children = std.ArrayList(FileEntry).init(selector.arena.allocator());
+        try selector.loadChildren(selected_file_entry, 0);
+    }
+    //entry.is_open = !entry.is_open;
+    //            if (entry.is_open) {
+    //                entry.children = std.ArrayList(FileEntry).init(self.arena.allocator());
+    //                try self.loadChildren(entry, 0);
+    //            }
+    //std.debug.print("Selected file entry: {s}\n", .{selected_file_entry.name});
+    const first_child = if (selected_file_entry.children) |children|
+        if (children.items.len > 0)
+            children.items[0]
+        else
+            null
+    else
+        null;
+    //std.debug.print("First child: {?}\n", .{first_child});
+    if (first_child == null) {
+        return;
+    }
+    try selector.appendToSelectedPath(first_child.?.name);
+}
+
 //const DirectorySelector = struct {
 //
 //    idx: usize,
