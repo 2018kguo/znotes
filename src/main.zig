@@ -41,8 +41,8 @@ fn printChildren(win: *vaxis.Window, children: ?std.ArrayList(FileEntry), depth:
             if (child.kind == .directory) {
                 style.fg = .{ .index = 4 };
             }
+            //std.debug.print("cur_path: {s}, child name: {s}\n", .{ cur_path, child.name });
             if (pathMatchesAtDepth(cur_path, depth, child.name)) {
-                //std.debug.print("Matched: {s}\n", .{child.name});
                 style.reverse = true;
             }
 
@@ -153,8 +153,19 @@ pub fn main() !void {
                     try testNavigateToSibling(&selector, -1, current_absolute_path);
                 } else if (key.codepoint == 'l') {
                     const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
-                    try navigateToFirstChild(&selector, selected_entry);
-                    //std.debug.print("Selected path: {s}\n", .{selector.selected_path});
+                    if (selected_entry.kind == .directory) {
+                        try navigateToFirstChild(&selector, selected_entry);
+                    } else {
+                        try vx.exitAltScreen(tty.anyWriter());
+                        try vx.resetState(tty.anyWriter());
+                        loop.stop();
+                        try openFileInEditor(&selector, selected_entry, alloc);
+                        //std.debug.print("Selected path: {s}\n", .{selector.selected_path});
+                        try loop.start();
+                        try vx.enterAltScreen(tty.anyWriter());
+                        try vx.enableDetectedFeatures(tty.anyWriter());
+                        vx.queueRefresh();
+                    }
                 } else if (key.codepoint == 't') {
                     test_mode = !test_mode;
                     //if (children) |unwrapped_children| {
@@ -164,7 +175,16 @@ pub fn main() !void {
                     //    }
                     //}
                 } else if (key.codepoint == 'h') {
-                    // TODO
+                    const last_slash_index = std.mem.lastIndexOfScalar(u8, selector.selected_path[0..selector.selected_path_len], '/') orelse return error.NoParentDirectory;
+                    if (last_slash_index == current_absolute_path.len) {
+                        // We're at the root, do nothing
+                        continue;
+                    }
+                    navigateToParent(&selector);
+                    const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
+                    if (selected_entry.kind == .directory) {
+                        selected_entry.is_open = false;
+                    }
                 } else if (key.codepoint == 'q') {
                     break;
                 }
@@ -286,7 +306,7 @@ const DirectoryState = struct {
 const DirectorySelector = struct {
     arena: std.heap.ArenaAllocator,
     root: *FileEntry,
-    selected_path: [2048]u8,
+    selected_path: [std.fs.max_path_bytes]u8,
     selected_path_len: usize,
     history: std.ArrayList(DirectoryState),
     history_allocator: std.mem.Allocator,
@@ -327,6 +347,8 @@ const DirectorySelector = struct {
         }
 
         @memcpy(self.selected_path[0..path.len], path);
+        // zero out the rest of the buffer
+        @memset(self.selected_path[path.len..], 0);
         self.selected_path_len = path.len;
     }
 
@@ -384,7 +406,7 @@ const DirectorySelector = struct {
         self.selected_path_len += name.len + 1;
     }
 
-    pub fn popFromSelectedPath(self: *DirectorySelector) !void {
+    pub fn popFromSelectedPath(self: *DirectorySelector) void {
         if (self.selected_path_len == 0) return;
 
         var i = self.selected_path_len - 1;
@@ -395,6 +417,7 @@ const DirectorySelector = struct {
         }
 
         self.selected_path_len = i;
+        @memset(self.selected_path[self.selected_path_len..], 0);
     }
 
     pub fn changeDirectory(self: *DirectorySelector, new_path: []const u8) !void {
@@ -577,6 +600,16 @@ const FileEntry = struct {
     }
 };
 
+//fn findChildIndex(parent: *FileEntry, child: *FileEntry) ?usize {
+//    if (parent.children) |children| {
+//        for (children.items, 0..) |*entry, index| {
+//            if (entry != null and child != null and entry == child) {
+//                return index;
+//            }
+//        }
+//    }
+//    return null;
+//}
 fn findChildIndex(parent: *FileEntry, child: *FileEntry) ?usize {
     if (parent.children) |children| {
         for (children.items, 0..) |*entry, index| {
@@ -688,6 +721,24 @@ fn navigateToFirstChild(selector: *DirectorySelector, selected_file_entry: *File
         return;
     }
     try selector.appendToSelectedPath(first_child.?.name);
+}
+
+fn navigateToParent(selector: *DirectorySelector) void {
+    selector.popFromSelectedPath();
+}
+
+fn openFileInEditor(selector: *DirectorySelector, selected_file_entry: *FileEntry, alloc: std.mem.Allocator) !void {
+    if (selected_file_entry.kind == .directory) return;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    @memcpy(path_buf[0..selector.selected_path_len], selector.selected_path[0..selector.selected_path_len]);
+    path_buf[selector.selected_path_len] = 0;
+    var editor_buf: [256]u8 = undefined;
+    @memcpy(editor_buf[0..4], "nvim");
+    editor_buf[4] = 0;
+    //std.debug.print("Opening file: {s}\n", .{path_buf});
+    //_ = alloc;
+    var child = std.process.Child.init(&.{ &editor_buf, &path_buf }, alloc);
+    _ = try child.spawnAndWait();
 }
 
 //const DirectorySelector = struct {
