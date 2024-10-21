@@ -325,10 +325,10 @@ const DirectorySelector = struct {
             .history_allocator = allocator,
             .entry_count = 0,
         };
+        try self.setSelectedPath(path);
 
         self.root = try FileEntry.init(self.arena.allocator(), path, .directory);
         try self.loadChildren(self.root, 0);
-        try self.setSelectedPath(path);
 
         return self;
     }
@@ -428,16 +428,26 @@ const DirectorySelector = struct {
         self.entry_count = 0;
 
         self.root = try FileEntry.init(self.arena.allocator(), new_path, .directory);
-        try self.loadChildren(self.root, 0);
         try self.setSelectedPath(new_path);
+        try self.loadChildren(self.root, 0);
     }
 
     fn loadChildren(self: *DirectorySelector, entry: *FileEntry, depth: usize) !void {
         if (entry.kind != .directory or depth >= 2 or self.entry_count >= MAX_ENTRIES) return;
 
-        var dir = std.fs.cwd().openDir(entry.name, .{ .iterate = true }) catch |err| {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_len = @min(self.selected_path_len, std.fs.max_path_bytes);
+        @memcpy(path_buf[0..path_len], self.selected_path[0..path_len]);
+
+        // Create a slice of the actual path data
+        const path_slice = path_buf[0..path_len];
+
+        //std.debug.print("selected_path: {s}\n", .{self.selected_path});
+        //std.debug.print("path buf: {s}\n", .{path_slice});
+
+        var dir = std.fs.openDirAbsolute(path_slice, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound) {
-                //std.debug.print("Directory not found: {s}\n", .{entry.name});
+                std.debug.print("Directory not found: {s}\n", .{entry.name});
                 return;
             }
             return err; // Propagate other errors
@@ -730,15 +740,25 @@ fn navigateToParent(selector: *DirectorySelector) void {
 fn openFileInEditor(selector: *DirectorySelector, selected_file_entry: *FileEntry, alloc: std.mem.Allocator) !void {
     if (selected_file_entry.kind == .directory) return;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    const path_slice = path_buf[0..selector.selected_path_len];
     @memcpy(path_buf[0..selector.selected_path_len], selector.selected_path[0..selector.selected_path_len]);
-    path_buf[selector.selected_path_len] = 0;
-    var editor_buf: [256]u8 = undefined;
-    @memcpy(editor_buf[0..4], "nvim");
-    editor_buf[4] = 0;
-    //std.debug.print("Opening file: {s}\n", .{path_buf});
-    //_ = alloc;
-    var child = std.process.Child.init(&.{ &editor_buf, &path_buf }, alloc);
+
+    const editor_slice = "nvim";
+
+    var child = std.process.Child.init(&.{ editor_slice, path_slice }, alloc);
     _ = try child.spawnAndWait();
+
+    //var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    //@memcpy(path_buf[0..selector.selected_path_len], selector.selected_path[0..selector.selected_path_len]);
+    //path_buf[selector.selected_path_len] = 0;
+    //var editor_buf: [256]u8 = undefined;
+    //@memcpy(editor_buf[0..4], "nvim");
+    //editor_buf[4] = 0;
+    ////std.debug.print("Opening file: {s}\n", .{path_buf});
+    ////_ = alloc;
+    //var child = std.process.Child.init(&.{ &editor_buf, &path_buf }, alloc);
+    //_ = try child.spawnAndWait();
 }
 
 //const DirectorySelector = struct {
