@@ -91,25 +91,11 @@ pub fn main() !void {
     try vx.enterAltScreen(tty.anyWriter());
     try vx.queryTerminal(tty.anyWriter(), 1 * std.time.ns_per_s);
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
     const current_absolute_path = try std.fs.cwd().realpathAlloc(alloc, ".");
     defer alloc.free(current_absolute_path);
 
     var selector = try DirectorySelector.init(alloc, current_absolute_path);
     defer selector.deinit();
-    //const arena_alloc = arena.allocator();
-
-    //const path = "."; // Current directory
-    //var timer = try Timer.start();
-    //_ = try iterateDir(arena_alloc, path, 0);
-    //const elapsed2: f64 = @floatFromInt(timer.read());
-    //print("Time elapsed is: {d:.3}ms\n", .{
-    //    elapsed2 / time.ns_per_ms,
-    //});
-
-    //try printTree(arena_alloc, root, 0);
 
     const top_div_height = 1;
     const bottom_div_height = 1;
@@ -148,9 +134,9 @@ pub fn main() !void {
                 if (key.codepoint == 'c' and key.mods.ctrl) {
                     break;
                 } else if (key.matches(vaxis.Key.tab, .{}) or key.codepoint == 'j') {
-                    try testNavigateToSibling(&selector, 1, current_absolute_path);
+                    try navigateToSibling(&selector, 1, current_absolute_path);
                 } else if (key.codepoint == 'k') {
-                    try testNavigateToSibling(&selector, -1, current_absolute_path);
+                    try navigateToSibling(&selector, -1, current_absolute_path);
                 } else if (key.codepoint == 'l') {
                     const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
                     if (selected_entry.kind == .directory) {
@@ -220,25 +206,6 @@ pub fn main() !void {
         const cur_path = selector.selected_path[current_absolute_path.len + 1 ..];
 
         _ = try printChildren(&main_win, children, 0, 0, cur_path);
-        //if (children) |unwrapped_children| {
-        //    for (unwrapped_children.items, 0..) |child, j| {
-        //        var style: vaxis.Style = .{};
-        //        if (child.is_open) {
-        //            style.ul_style = .single;
-        //        }
-        //        if (child.kind == .directory) {
-        //            style.fg = .{ .index = 4 };
-        //        }
-        //        if (j == cursor_index) {
-        //            style.reverse = true;
-        //        }
-        //        var seg = [_]vaxis.Segment{.{
-        //            .text = child.name,
-        //            .style = style,
-        //        }};
-        //        _ = main_win.print(&seg, .{ .row_offset = j + 0 }) catch {};
-        //    }
-        //}
 
         _ = win.child(.{
             .x_off = 0,
@@ -374,27 +341,7 @@ const DirectorySelector = struct {
 
         // Update the length
         self.selected_path_len = new_len;
-
-        // Add a debug print to verify the change
-        //std.debug.print("New selected path: {s}\n", .{self.selected_path[0..self.selected_path_len]});
     }
-    //pub fn setSelectedPathToSibling(self: *DirectorySelector, sibling_name: []const u8) !void {
-    //    // Find the last slash in the current path
-    //    const last_slash_index = std.mem.lastIndexOfScalar(u8, self.selected_path[0..self.selected_path_len], '/') orelse return error.NoParentDirectory;
-
-    //    // Calculate the new length
-    //    const new_len = last_slash_index + 1 + sibling_name.len;
-
-    //    // Ensure the new path fits in the buffer
-    //    if (new_len > self.selected_path.len) {
-    //        return error.PathTooLong;
-    //    }
-
-    //    // Copy the sibling name after the last slash
-    //    @memcpy(self.selected_path[last_slash_index + 1 .. new_len], sibling_name);
-
-    //    self.selected_path_len = @intCast(new_len);
-    //}
 
     pub fn appendToSelectedPath(self: *DirectorySelector, name: []const u8) !void {
         if (self.selected_path_len + name.len + 1 > self.selected_path.len) {
@@ -442,9 +389,6 @@ const DirectorySelector = struct {
         // Create a slice of the actual path data
         const path_slice = path_buf[0..path_len];
 
-        //std.debug.print("selected_path: {s}\n", .{self.selected_path});
-        //std.debug.print("path buf: {s}\n", .{path_slice});
-
         var dir = std.fs.openDirAbsolute(path_slice, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound) {
                 std.debug.print("Directory not found: {s}\n", .{entry.name});
@@ -461,7 +405,6 @@ const DirectorySelector = struct {
             const child = try FileEntry.init(self.arena.allocator(), file_entry.name, file_entry.kind);
             try entry.children.?.append(child.*);
             self.entry_count += 1;
-            //std.debug.print("entry_count: {d}\n", .{self.entry_count});
 
             if (file_entry.kind == .directory and depth < 1) {
                 try self.loadChildren(child, depth + 1);
@@ -510,38 +453,6 @@ const DirectorySelector = struct {
                 if (entry.children) |children| {
                     var found = false;
                     for (children.items) |*child| {
-                        if (std.mem.startsWith(u8, segment, child.name)) {
-                            current_entry = child;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        return null; // Path segment not found
-                    }
-                } else {
-                    return null; // Current entry is not a directory
-                }
-            } else {
-                return null; // Current entry is null
-            }
-        }
-
-        return current_entry;
-    }
-
-    fn testFindEntryFromPath(self: *DirectorySelector, path: []const u8) ?*FileEntry {
-        var it = std.mem.split(u8, path, "/");
-        var current_entry: ?*FileEntry = self.root;
-
-        while (it.next()) |segment| {
-            if (segment.len == 0) continue;
-
-            if (current_entry) |entry| {
-                if (entry.children) |children| {
-                    var found = false;
-                    for (children.items) |*child| {
-                        //std.debug.print("Segment: {s}, child name: {s}\n", .{ segment, child.name });
                         if (std.mem.startsWith(u8, segment, child.name)) {
                             current_entry = child;
                             found = true;
@@ -610,16 +521,6 @@ const FileEntry = struct {
     }
 };
 
-//fn findChildIndex(parent: *FileEntry, child: *FileEntry) ?usize {
-//    if (parent.children) |children| {
-//        for (children.items, 0..) |*entry, index| {
-//            if (entry != null and child != null and entry == child) {
-//                return index;
-//            }
-//        }
-//    }
-//    return null;
-//}
 fn findChildIndex(parent: *FileEntry, child: *FileEntry) ?usize {
     if (parent.children) |children| {
         for (children.items, 0..) |*entry, index| {
@@ -638,58 +539,13 @@ fn navigateToSibling(selector: *DirectorySelector, index_increment: i32, current
 
     // The parent path is everything up to the last slash
     const parent_path = selector.selected_path[0..last_slash_index];
-    //std.debug.print("Parent path: {s}\n", .{parent_path});
-    //std.debug.print("Selected entry: {s}\n", .{selected_entry.name});
-    const parent_entry = selector.findEntryFromPath(parent_path) orelse selector.root;
-    //std.debug.print("Parent entry: {s}\n", .{parent_entry.name});
-    //_ = selected_entry;
-    const index_of_selected = findChildIndex(parent_entry, selected_entry).?;
-    //std.debug.print("Index of selected: {?}\n", .{index_of_selected});
-    //std.debug.print("selected_entry: {?}\n", .{selected_entry});
-    //std.debug.print("Index of selected: {d}\n", .{index_of_selected});
-    var new_cursor_index: usize = if (index_increment < 0)
-        if (@abs(index_increment) > index_of_selected)
-            0
-        else
-            index_of_selected - @as(usize, @intCast(@abs(index_increment)))
-    else
-        index_of_selected +| @as(usize, @intCast(index_increment));
-    new_cursor_index = new_cursor_index % parent_entry.children.?.items.len;
-    //std.debug.print("New cursor index: {d}\n", .{new_cursor_index});
-    const child = parent_entry.children.?.items[new_cursor_index];
-    //std.debug.print("child name: {s}\n", .{child.name});
-    selector.setSelectedPathToSibling(child.name) catch {
-        std.debug.print("Error setting selected path to sibling\n", .{});
-    };
-}
-
-fn testNavigateToSibling(selector: *DirectorySelector, index_increment: i32, current_absolute_path: []u8) !void {
-    const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
-    // Find the last slash in the current path
-    const last_slash_index = std.mem.lastIndexOfScalar(u8, selector.selected_path[0..selector.selected_path_len], '/') orelse return error.NoParentDirectory;
-
-    // The parent path is everything up to the last slash
-    const parent_path = selector.selected_path[0..last_slash_index];
-    //std.debug.print("Parent path: {s}\n", .{parent_path});
-    //std.debug.print("Selected entry: {s}\n", .{selected_entry.name});
     const parent_path_minus_absolute = parent_path[current_absolute_path.len..];
     const parent_entry = selector.findEntryFromPath(parent_path_minus_absolute) orelse selector.root;
 
-    //const find_parent_test = selector.testFindEntryFromPath(parent_path_minus_absolute);
-    //std.debug.print("Find parent test: {?}\n", .{find_parent_test});
-    ////std.debug.print("Parent entry: {s}\n", .{parent_entry.name});
-    ////_ = selected_entry;
     const index_of_selected = findChildIndex(parent_entry, selected_entry) orelse {
         std.debug.print("Error finding index of selected\n", .{});
         return;
     };
-    //std.debug.print("Index of selected: {?}\n", .{index_of_selected});
-    //std.debug.print("selected entry name: {s}\n", .{selected_entry.name});
-    //std.debug.print("parent path: {s}\n", .{parent_path});
-    //std.debug.print("is selector root: {d}\n", .{parent_entry == selector.root});
-    ////std.debug.print("Index of selected: {?}\n", .{index_of_selected});
-    ////std.debug.print("selected_entry: {?}\n", .{selected_entry});
-    ////std.debug.print("Index of selected: {d}\n", .{index_of_selected});
     var new_cursor_index: usize = if (index_increment < 0)
         if (@abs(index_increment) > index_of_selected)
             0
@@ -698,9 +554,7 @@ fn testNavigateToSibling(selector: *DirectorySelector, index_increment: i32, cur
     else
         index_of_selected +| @as(usize, @intCast(index_increment));
     new_cursor_index = new_cursor_index % parent_entry.children.?.items.len;
-    ////std.debug.print("New cursor index: {d}\n", .{new_cursor_index});
     const child = parent_entry.children.?.items[new_cursor_index];
-    ////std.debug.print("child name: {s}\n", .{child.name});
     selector.setSelectedPathToSibling(child.name) catch {
         std.debug.print("Error setting selected path to sibling\n", .{});
     };
@@ -713,12 +567,6 @@ fn navigateToFirstChild(selector: *DirectorySelector, selected_file_entry: *File
         selected_file_entry.children = std.ArrayList(FileEntry).init(selector.arena.allocator());
         try selector.loadChildren(selected_file_entry, 0);
     }
-    //entry.is_open = !entry.is_open;
-    //            if (entry.is_open) {
-    //                entry.children = std.ArrayList(FileEntry).init(self.arena.allocator());
-    //                try self.loadChildren(entry, 0);
-    //            }
-    //std.debug.print("Selected file entry: {s}\n", .{selected_file_entry.name});
     const first_child = if (selected_file_entry.children) |children|
         if (children.items.len > 0)
             children.items[0]
@@ -726,7 +574,6 @@ fn navigateToFirstChild(selector: *DirectorySelector, selected_file_entry: *File
             null
     else
         null;
-    //std.debug.print("First child: {?}\n", .{first_child});
     if (first_child == null) {
         return;
     }
@@ -748,124 +595,7 @@ fn openFileInEditor(selector: *DirectorySelector, selected_file_entry: *FileEntr
 
     var child = std.process.Child.init(&.{ editor_slice, path_slice }, alloc);
     _ = try child.spawnAndWait();
-
-    //var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    //@memcpy(path_buf[0..selector.selected_path_len], selector.selected_path[0..selector.selected_path_len]);
-    //path_buf[selector.selected_path_len] = 0;
-    //var editor_buf: [256]u8 = undefined;
-    //@memcpy(editor_buf[0..4], "nvim");
-    //editor_buf[4] = 0;
-    ////std.debug.print("Opening file: {s}\n", .{path_buf});
-    ////_ = alloc;
-    //var child = std.process.Child.init(&.{ &editor_buf, &path_buf }, alloc);
-    //_ = try child.spawnAndWait();
 }
-
-//const DirectorySelector = struct {
-//
-//    idx: usize,
-//
-//    fn init(allocator: std.mem.Allocator, path: []const u8) !DirectorySelector {
-//        const dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
-//        return DirectorySelector{ .dir = dir, .idx = 0 };
-//    }
-//
-//    fn next() !std.fs.File {
-//        const entry = try this.dir.iterate().next();
-//        return entry;
-//    }
-//
-//    fn deinit() void {
-//        this.dir.close();
-//    }
-//};
-//
-//const FileEntry = struct {
-//    name: []const u8,
-//    kind: std.fs.File.Kind,
-//    children: ?std.ArrayList(FileEntry),
-//    uuid: [36]u8,
-//
-//    fn init(allocator: std.mem.Allocator, name: []const u8, kind: std.fs.File.Kind) !FileEntry {
-//        const uuid = UUID.init();
-//        var uuid_str: [36]u8 = undefined;
-//        uuid.to_string(&uuid_str);
-//        return FileEntry{
-//            .name = try allocator.dupe(u8, name),
-//            .kind = kind,
-//            .children = if (kind == .directory) try std.ArrayList(FileEntry).initCapacity(allocator, 10) else null,
-//            .uuid = uuid_str,
-//        };
-//    }
-//
-//    fn deinit(self: *FileEntry, allocator: std.mem.Allocator) void {
-//        allocator.free(self.name);
-//        if (self.children) |*children| {
-//            for (children.items) |*child| {
-//                child.deinit(allocator);
-//            }
-//            children.deinit();
-//        }
-//    }
-//};
-//
-//fn iterateDir(allocator: std.mem.Allocator, path: []const u8, depth: usize) !FileEntry {
-//    var dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
-//    defer dir.close();
-//
-//    var root = try FileEntry.init(allocator, path, .directory);
-//    errdefer root.deinit(allocator);
-//
-//    var it = dir.iterate();
-//    while (try it.next()) |entry| {
-//        if (depth >= 2 and entry.kind == .directory) continue;
-//
-//        var file_entry = try FileEntry.init(allocator, entry.name, entry.kind);
-//        errdefer file_entry.deinit(allocator);
-//
-//        if (entry.kind == .directory and depth < 2) {
-//            const subpath = try std.fs.path.join(allocator, &[_][]const u8{ path, entry.name });
-//            defer allocator.free(subpath);
-//            file_entry = try iterateDir(allocator, subpath, depth + 1);
-//        }
-//
-//        try root.children.?.append(file_entry);
-//    }
-//
-//    return root;
-//}
-
-//fn printTree(allocator: std.mem.Allocator, entry: FileEntry, depth: usize) !void {
-//    const indent_step = "  ";
-//    const total_indent_len = depth * indent_step.len;
-//
-//    var indent = try allocator.alloc(u8, total_indent_len);
-//    defer allocator.free(indent);
-//
-//    var i: usize = 0;
-//    while (i < depth) : (i += 1) {
-//        @memcpy(indent[i * indent_step.len .. (i + 1) * indent_step.len], indent_step);
-//    }
-//
-//    try std.io.getStdOut().writer().print("{s}{s} {s}\n", .{ indent, @tagName(entry.kind), entry.name });
-//
-//    if (entry.children) |children| {
-//        for (children.items) |child| {
-//            try printTree(allocator, child, depth + 1);
-//        }
-//    }
-//}
-
-//fn printTree(entry: FileEntry, depth: usize) !void {
-//    const indent = "  " ** depth;
-//    std.debug.print("{s}{s} {s}\n", .{ indent, @tagName(entry.kind), entry.name });
-//
-//    if (entry.children) |children| {
-//        for (children.items) |child| {
-//            try printTree(child, depth + 1);
-//        }
-//    }
-//}
 
 // Our Event. This can contain internal events as well as Vaxis events.
 // Internal events can be posted into the same queue as vaxis events to allow
