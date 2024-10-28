@@ -97,12 +97,14 @@ pub fn main() !void {
     var selector = try DirectorySelector.init(alloc, current_absolute_path);
     defer selector.deinit();
 
+    var file_previews = try FilePreviews.init(alloc);
+    defer file_previews.deinit();
+
     const top_div_height = 1;
     const bottom_div_height = 1;
 
     // We'll adjust the color index every keypress
     var color_idx: u8 = 0;
-    const msg = "Hello, world!";
 
     if (selector.root.children) |unwrapped_children| {
         if (unwrapped_children.items.len > 0) {
@@ -171,6 +173,11 @@ pub fn main() !void {
                     if (selected_entry.kind == .directory) {
                         selected_entry.is_open = false;
                     }
+                } else if (key.codepoint == 'r') {
+                    const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
+                    if (selected_entry.kind == .file) {
+                        _ = try file_previews.loadPreviewForFilePath(selector.selected_path[0..selector.selected_path_len], true);
+                    }
                 } else if (key.codepoint == 'q') {
                     break;
                 }
@@ -231,20 +238,19 @@ pub fn main() !void {
         });
 
         // Loop through the message and print the cells to the screen
-        for (msg, 0..) |_, i| {
-            const cell: Cell = .{
-                // each cell takes a _grapheme_ as opposed to a single
-                // codepoint. This allows Vaxis to handle emoji properly,
-                // particularly with terminals that the Unicode Core extension
-                // (IE Mode 2027)
-                .char = .{ .grapheme = msg[i .. i + 1] },
-                .style = .{
-                    .fg = .{ .index = color_idx },
-                },
-            };
-            preview_win.writeCell(i, 0, cell);
+        const file_preview = file_previews.getPreviewForFilePath(selector.selected_path[0..selector.selected_path_len]);
+        if (file_preview) |preview| {
+            var seg = [_]vaxis.Segment{.{
+                .text = preview,
+            }};
+            _ = preview_win.print(&seg, .{ .row_offset = 0 }) catch {};
+        } else {
+            var seg = [_]vaxis.Segment{.{
+                .text = "No preview available",
+                .style = .{ .reverse = true },
+            }};
+            _ = preview_win.print(&seg, .{ .row_offset = 0 }) catch {};
         }
-        //std.debug.print("Selected path at end of loop: {s}\n", .{selector.selected_path});
         // Render the screen
         try vx.render(tty.anyWriter());
     }
@@ -252,6 +258,72 @@ pub fn main() !void {
 
 const MAX_HISTORY = 10; // Adjust as needed
 const MAX_ENTRIES = 10000; // Maximum number of FileEntry items
+const MAX_FILE_PREVIEW_SIZE = 2056;
+
+const FilePreviews = struct {
+    preview_map: std.StringHashMap([]const u8),
+    allocator: std.mem.Allocator, // Store allocator for cleanup
+
+    pub fn init(allocator: std.mem.Allocator) !FilePreviews {
+        return FilePreviews{
+            .preview_map = std.StringHashMap([]const u8).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *FilePreviews) void {
+        // Free all the stored buffers
+        var it = self.preview_map.iterator();
+        while (it.next()) |entry| {
+            // Free both the key (if it was allocated) and value
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.preview_map.deinit();
+    }
+
+    pub fn loadPreviewForFilePath(self: *FilePreviews, path: []const u8, upsert: bool) ![]const u8 {
+        // Check existing first
+        if (!upsert) {
+            if (self.preview_map.get(path)) |existing| {
+                return existing;
+            }
+        }
+
+        var file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+
+        const file_size = try file.getEndPos();
+        try file.seekTo(0);
+        const slice_size = @min(file_size, MAX_FILE_PREVIEW_SIZE);
+        const buffer = try self.allocator.alloc(u8, slice_size);
+        const bytes_read = file.read(buffer) catch |err| {
+            self.allocator.free(buffer);
+            return err;
+        };
+
+        // If we read less than we allocated, resize the buffer
+        const final_buffer = if (bytes_read < slice_size)
+            try self.allocator.realloc(buffer, bytes_read)
+        else
+            buffer;
+
+        // Handle upsert case - free existing value if it exists
+        if (self.preview_map.getPtr(path)) |value_ptr| {
+            self.allocator.free(value_ptr.*);
+            value_ptr.* = final_buffer;
+        } else {
+            // New entry case
+            try self.preview_map.put(try self.allocator.dupe(u8, path), final_buffer);
+        }
+
+        return final_buffer;
+    }
+
+    pub fn getPreviewForFilePath(self: *FilePreviews, path: []const u8) ?[]const u8 {
+        return self.preview_map.get(path);
+    }
+};
 
 const DirectoryState = struct {
     path: []const u8,
