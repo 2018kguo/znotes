@@ -238,7 +238,14 @@ pub fn main() !void {
         });
 
         // Loop through the message and print the cells to the screen
-        const file_preview = file_previews.getPreviewForFilePath(selector.selected_path[0..selector.selected_path_len]);
+        var file_preview = file_previews.getPreviewForFilePath(selector.selected_path[0..selector.selected_path_len]);
+        if (file_preview == null) {
+            const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]).?;
+            if (selected_entry.kind == .file) {
+                _ = try file_previews.loadPreviewForFilePath(selector.selected_path[0..selector.selected_path_len], true);
+            }
+            file_preview = file_previews.getPreviewForFilePath(selector.selected_path[0..selector.selected_path_len]);
+        }
         if (file_preview) |preview| {
             var seg = [_]vaxis.Segment{.{
                 .text = preview,
