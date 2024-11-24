@@ -292,6 +292,7 @@ const DirectorySelector = struct {
         var it = dir.iterate();
         while (try it.next()) |file_entry| {
             if (self.entry_count >= MAX_ENTRIES) break;
+            if (std.mem.startsWith(u8, file_entry.name, ".")) continue;
 
             const child = try FileEntry.init(self.arena.allocator(), file_entry.name, file_entry.kind);
             try entry.children.?.append(child.*);
@@ -449,6 +450,20 @@ const Event = union(enum) {
     focus_in,
 };
 
+fn resolvePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, path, "~")) {
+        const home_dir = std.posix.getenv("HOME") orelse return error.NoHomeEnv;
+        // Skip the "~" and concatenate with home_dir
+        return std.mem.concat(allocator, u8, &.{
+            home_dir,
+            path[1..], // everything after the ~
+        });
+    } else {
+        // No tilde, just return a copy of the path
+        return try allocator.dupe(u8, path);
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
@@ -458,6 +473,97 @@ pub fn main() !void {
         }
     }
     const alloc = gpa.allocator();
+
+    // Get command line args
+    var args = try std.process.argsWithAllocator(alloc);
+    defer args.deinit();
+
+    // Skip program name
+    _ = args.next();
+
+    // Check for config directory and file
+    const home_dir = std.process.getEnvVarOwned(alloc, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.HomeNotFound,
+        else => |e| return e,
+    };
+    defer alloc.free(home_dir);
+
+    const config_dir_path = try std.fmt.allocPrint(alloc, "{s}/.config/znotes", .{home_dir});
+    defer alloc.free(config_dir_path);
+
+    const config_file_path = try std.fmt.allocPrint(alloc, "{s}/config.json", .{config_dir_path});
+    defer alloc.free(config_file_path);
+
+    // Create config directory if it doesn't exist
+    std.fs.makeDirAbsolute(config_dir_path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => |e| return e,
+    };
+
+    // Try to open existing file first
+    var config_file = std.fs.openFileAbsolute(config_file_path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            // If file doesn't exist, create it
+            var new_file = try std.fs.createFileAbsolute(config_file_path, .{
+                .read = true,
+            });
+            try new_file.writeAll("{}");
+            try new_file.sync();
+            // Seek back to start of file for reading
+            try new_file.seekTo(0);
+            break :blk new_file;
+        },
+        else => |e| return e,
+    };
+    defer config_file.close();
+
+    // Get file metadata to check if it's empty
+    const file_stat = try config_file.stat();
+    var config_json: struct { target_path: ?[]const u8 = null } = .{};
+    defer if (config_json.target_path) |path| {
+        alloc.free(path);
+    };
+
+    if (file_stat.size > 0) {
+        // Read and parse existing config
+        const file_contents = try config_file.readToEndAlloc(alloc, 1024 * 1024);
+        defer alloc.free(file_contents);
+
+        var parse_result = try std.json.parseFromSlice(
+            @TypeOf(config_json),
+            alloc,
+            file_contents,
+            .{},
+        );
+        // Make a copy of the string if it exists
+        if (parse_result.value.target_path) |path| {
+            config_json.target_path = try alloc.dupe(u8, path);
+        }
+
+        // Now we can deinit
+        parse_result.deinit();
+    } else {
+        // Create empty config file
+        try config_file.writeAll("{}");
+        try config_file.sync();
+    }
+
+    // Get the target path from args or config or use current directory
+    var resolved_path: ?[]const u8 = null;
+    defer if (resolved_path) |path| alloc.free(path);
+
+    const target_path = if (args.next()) |path| blk: {
+        // Args have highest priority
+        break :blk try std.fs.realpathAlloc(alloc, path);
+    } else if (config_json.target_path) |config_path| blk: {
+        resolved_path = try resolvePath(alloc, config_path);
+        // Config path has second priority
+        break :blk try std.fs.realpathAlloc(alloc, resolved_path.?);
+    } else blk: {
+        // Current directory is the fallback
+        break :blk try std.fs.cwd().realpathAlloc(alloc, ".");
+    };
+    defer alloc.free(target_path);
 
     var tty = try vaxis.Tty.init();
     defer tty.deinit();
@@ -474,10 +580,7 @@ pub fn main() !void {
     try vx.queryTerminal(tty.anyWriter(), 1 * std.time.ns_per_s);
     defer vx.exitAltScreen(tty.anyWriter()) catch {};
 
-    const current_absolute_path = try std.fs.cwd().realpathAlloc(alloc, ".");
-    defer alloc.free(current_absolute_path);
-
-    var selector = try DirectorySelector.init(alloc, current_absolute_path);
+    var selector = try DirectorySelector.init(alloc, target_path);
     defer selector.deinit();
 
     var file_previews = try FilePreviews.init(alloc);
@@ -502,11 +605,11 @@ pub fn main() !void {
                 if (key.codepoint == 'c' and key.mods.ctrl) {
                     break;
                 } else if (key.matches(vaxis.Key.tab, .{}) or key.codepoint == 'j') {
-                    try navigateToSibling(&selector, 1, current_absolute_path);
+                    try navigateToSibling(&selector, 1, target_path);
                 } else if (key.codepoint == 'k') {
-                    try navigateToSibling(&selector, -1, current_absolute_path);
+                    try navigateToSibling(&selector, -1, target_path);
                 } else if (key.codepoint == 'l') {
-                    const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]) orelse continue;
+                    const selected_entry = selector.findEntryFromPath(selector.selected_path[target_path.len..]) orelse continue;
                     if (selected_entry.kind == .directory) {
                         try navigateToFirstChild(&selector, selected_entry);
                     } else {
@@ -521,16 +624,16 @@ pub fn main() !void {
                     }
                 } else if (key.codepoint == 'h') {
                     const last_slash_index = std.mem.lastIndexOfScalar(u8, selector.selected_path[0..selector.selected_path_len], '/') orelse return error.NoParentDirectory;
-                    if (last_slash_index == current_absolute_path.len) continue;
+                    if (last_slash_index == target_path.len) continue;
 
                     navigateToParent(&selector);
-                    if (selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..])) |selected_entry| {
+                    if (selector.findEntryFromPath(selector.selected_path[target_path.len..])) |selected_entry| {
                         if (selected_entry.kind == .directory) {
                             selected_entry.is_open = false;
                         }
                     }
                 } else if (key.codepoint == 'r') {
-                    if (selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..])) |selected_entry| {
+                    if (selector.findEntryFromPath(selector.selected_path[target_path.len..])) |selected_entry| {
                         if (selected_entry.kind == .file) {
                             _ = try file_previews.loadPreviewForFilePath(selector.selected_path[0..selector.selected_path_len], true);
                         }
@@ -555,34 +658,27 @@ pub fn main() !void {
             .height = .{ .limit = win.height },
         });
 
-        const cur_path = selector.selected_path[current_absolute_path.len + 1 ..];
+        const cur_path = selector.selected_path[target_path.len + 1 ..];
         _ = try printChildren(&main_win, children, 0, 0, cur_path);
 
         _ = win.child(.{
             .x_off = 0,
             .y_off = 0,
-            .width = .{ .limit = win.width / 2 },
-            .height = .{ .limit = 1 },
-        });
-
-        const preview_header_win = win.child(.{
-            .x_off = win.width / 2,
-            .y_off = 0,
-            .width = .{ .limit = win.width },
+            .width = .{ .limit = win.width / 3 },
             .height = .{ .limit = 1 },
         });
 
         const preview_win = win.child(.{
-            .x_off = win.width / 2,
-            .y_off = 2,
-            .width = .{ .limit = win.width / 2 },
-            .height = .{ .limit = win.height - (preview_header_win.height + 1) },
+            .x_off = win.width / 3,
+            .y_off = 0,
+            .width = .{ .limit = win.width / 3 * 2 },
+            .height = .{ .limit = win.height },
             .border = .{ .where = .all, .glyphs = .single_square },
         });
 
         var file_preview = file_previews.getPreviewForFilePath(selector.selected_path[0..selector.selected_path_len]);
         if (file_preview == null) {
-            const selected_entry = selector.findEntryFromPath(selector.selected_path[current_absolute_path.len..]) orelse continue;
+            const selected_entry = selector.findEntryFromPath(selector.selected_path[target_path.len..]) orelse continue;
             if (selected_entry.kind == .file) {
                 _ = try file_previews.loadPreviewForFilePath(selector.selected_path[0..selector.selected_path_len], true);
             }
